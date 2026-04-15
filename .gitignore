@@ -10,6 +10,7 @@ yarn-error.log*
 pnpm-debug.log*
 dev-server*.log
 dev-server*.err
+vendor/yt-dlp/
 *.local
 .env
 .env.local

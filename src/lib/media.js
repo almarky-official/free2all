@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -27,7 +27,24 @@ const platformLabels = {
 
 const genericSourceLabel = "Source Link";
 
-const ytDlpBinary = process.env.YT_DLP_PATH || (process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
+const ytDlpBinaryName = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
+const bundledYtDlpBinaryPath = path.join(process.cwd(), "vendor", "yt-dlp", ytDlpBinaryName);
+const runtimeYtDlpBinaryPath = path.join(tmpdir(), "free2all-bin", ytDlpBinaryName);
+const ytDlpDownloadUrl =
+  process.env.YT_DLP_DOWNLOAD_URL?.trim() ||
+  `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${ytDlpBinaryName}`;
+const ytDlpPathCandidates = process.platform === "win32" ? ["yt-dlp.exe", "yt-dlp"] : ["yt-dlp"];
+const pythonYtDlpCandidates =
+  process.platform === "win32"
+    ? [
+        { command: "py", argsPrefix: ["-m", "yt_dlp"] },
+        { command: "python", argsPrefix: ["-m", "yt_dlp"] },
+        { command: "python3", argsPrefix: ["-m", "yt_dlp"] }
+      ]
+    : [
+        { command: "python3", argsPrefix: ["-m", "yt_dlp"] },
+        { command: "python", argsPrefix: ["-m", "yt_dlp"] }
+      ];
 const mediaProxyUrl =
   process.env.FREE2ALL_MEDIA_PROXY_URL?.trim() ||
   process.env.HTTPS_PROXY?.trim() ||
@@ -35,9 +52,11 @@ const mediaProxyUrl =
   process.env.ALL_PROXY?.trim() ||
   "";
 const mediaProxyMode = (process.env.FREE2ALL_MEDIA_PROXY_MODE || "blocked-only").trim().toLowerCase();
+const shouldAutoDownloadYtDlp = !/^(0|false)$/i.test(process.env.YT_DLP_AUTO_DOWNLOAD || "");
 const downloadJobs = globalThis.__free2allDownloadJobs || new Map();
 const downloadJobTimeouts = globalThis.__free2allDownloadJobTimeouts || new Map();
 const JOB_TTL_MS = 15 * 60 * 1000;
+let ytDlpCommandPromise;
 
 globalThis.__free2allDownloadJobs = downloadJobs;
 globalThis.__free2allDownloadJobTimeouts = downloadJobTimeouts;
@@ -125,6 +144,160 @@ export function sanitizeFilename(input) {
 export function buildFilename(title, extension) {
   const safeTitle = sanitizeFilename(title || "free2all-download") || "free2all-download";
   return `${safeTitle}.${extension}`;
+}
+
+async function fileExists(filePath) {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureExecutable(filePath) {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  await chmod(filePath, 0o755).catch(() => {});
+}
+
+async function isYtDlpCommandAvailable(command, argsPrefix = []) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const child = spawn(command, [...argsPrefix, "--version"], {
+      env: process.env,
+      windowsHide: true
+    });
+
+    child.once("error", () => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    });
+
+    child.once("close", (code) => {
+      if (!settled) {
+        settled = true;
+        resolve(code === 0);
+      }
+    });
+  });
+}
+
+async function downloadYtDlpBinary(targetPath) {
+  await mkdir(path.dirname(targetPath), { recursive: true });
+
+  const response = await fetch(ytDlpDownloadUrl, {
+    redirect: "follow",
+    headers: {
+      "user-agent": "free2all-yt-dlp-bootstrap"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`yt-dlp download failed with status ${response.status}.`);
+  }
+
+  const binary = Buffer.from(await response.arrayBuffer());
+
+  if (!binary.length) {
+    throw new Error("yt-dlp download returned an empty file.");
+  }
+
+  await writeFile(targetPath, binary);
+  await ensureExecutable(targetPath);
+
+  return targetPath;
+}
+
+async function findYtDlpCommand() {
+  const seen = new Set();
+  const candidates = [];
+  const envOverride = process.env.YT_DLP_PATH?.trim();
+
+  const addCandidate = (command, argsPrefix = []) => {
+    const key = `${command}::${argsPrefix.join(" ")}`;
+
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    candidates.push({ command, argsPrefix });
+  };
+
+  if (envOverride) {
+    addCandidate(envOverride);
+  }
+
+  if (await fileExists(bundledYtDlpBinaryPath)) {
+    await ensureExecutable(bundledYtDlpBinaryPath);
+    addCandidate(bundledYtDlpBinaryPath);
+  }
+
+  if (await fileExists(runtimeYtDlpBinaryPath)) {
+    await ensureExecutable(runtimeYtDlpBinaryPath);
+    addCandidate(runtimeYtDlpBinaryPath);
+  }
+
+  ytDlpPathCandidates.forEach((candidate) => addCandidate(candidate));
+  pythonYtDlpCandidates.forEach(({ command, argsPrefix }) => addCandidate(command, argsPrefix));
+
+  for (const candidate of candidates) {
+    if (await isYtDlpCommandAvailable(candidate.command, candidate.argsPrefix)) {
+      return candidate;
+    }
+  }
+
+  let autoDownloadError = null;
+
+  if (shouldAutoDownloadYtDlp) {
+    try {
+      await downloadYtDlpBinary(runtimeYtDlpBinaryPath);
+
+      if (await isYtDlpCommandAvailable(runtimeYtDlpBinaryPath)) {
+        return {
+          command: runtimeYtDlpBinaryPath,
+          argsPrefix: []
+        };
+      }
+    } catch (error) {
+      autoDownloadError = error;
+    }
+  }
+
+  const extraContext = autoDownloadError ? ` Automatic download also failed: ${autoDownloadError.message}` : "";
+  throw new Error(
+    `yt-dlp is not available on this server. Set YT_DLP_PATH or reinstall the app so Free2All can bundle it.${extraContext}`
+  );
+}
+
+async function resolveYtDlpCommand() {
+  if (!ytDlpCommandPromise) {
+    ytDlpCommandPromise = findYtDlpCommand().catch((error) => {
+      ytDlpCommandPromise = undefined;
+      throw error;
+    });
+  }
+
+  return ytDlpCommandPromise;
+}
+
+async function runYtDlpProcess(args) {
+  const ytDlp = await resolveYtDlpCommand();
+  return runProcess(ytDlp.command, [...ytDlp.argsPrefix, ...args]);
+}
+
+async function spawnYtDlpProcess(args) {
+  const ytDlp = await resolveYtDlpCommand();
+
+  return spawn(ytDlp.command, [...ytDlp.argsPrefix, ...args], {
+    env: process.env,
+    windowsHide: true
+  });
 }
 
 export function buildDownloadUrl({ sourceUrl, title, format, quality, variant = "media", thumbnailUrl }) {
@@ -347,7 +520,7 @@ function runProcess(command, args) {
 
     child.on("error", (error) => {
       if (error.code === "ENOENT") {
-        reject(new Error("yt-dlp is not installed or is not available on the server PATH."));
+        reject(new Error("The media extractor could not be started on this server instance."));
         return;
       }
 
@@ -487,7 +660,7 @@ async function fetchYtDlpInfo(url) {
 
   for (const attempt of attempts) {
     try {
-      const { stdout } = await runProcess(ytDlpBinary, [
+      const { stdout } = await runYtDlpProcess([
         ...getYtDlpBaseArgs(attempt.useProxy),
         "--dump-single-json",
         "--skip-download",
@@ -998,6 +1171,10 @@ function normalizeDownloadError(error) {
     return "This media appears to be DRM-protected, so Free2All cannot download it.";
   }
 
+  if (lowered.includes("yt-dlp is not available on this server") || lowered.includes("media extractor could not be started")) {
+    return "The server could not start yt-dlp. Reinstall dependencies on the host or set YT_DLP_PATH to a working binary.";
+  }
+
   if (lowered.includes("certificate verify failed") || lowered.includes("ssl")) {
     return "The source website failed SSL verification from the current environment, so the download could not be prepared cleanly.";
   }
@@ -1103,10 +1280,7 @@ export async function startDownloadJob({ sourceUrl, title, format, quality }) {
       useProxy: attempt.useProxy
     });
 
-    const child = spawn(ytDlpBinary, args, {
-      env: process.env,
-      windowsHide: true
-    });
+    const child = await spawnYtDlpProcess(args);
 
     job.child = child;
     let finished = false;
@@ -1240,7 +1414,7 @@ export async function downloadMediaAsset({ sourceUrl, title, format, quality }) 
     });
 
     try {
-      await runProcess(ytDlpBinary, args);
+      await runYtDlpProcess(args);
       const filePath = await findDownloadedFile(tempDirectory, format);
 
       return { filePath, tempDirectory };
