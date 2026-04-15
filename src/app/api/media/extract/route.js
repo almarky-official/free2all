@@ -4,6 +4,7 @@ import { ZodError } from "zod";
 import { extractMedia, validateUrlPayload } from "@/lib/media";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 export async function POST(request) {
   try {

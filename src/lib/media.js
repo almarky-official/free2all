@@ -5,6 +5,7 @@ import { access, chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 
 import ffmpegPath from "ffmpeg-static";
 import { z } from "zod";
@@ -27,8 +28,17 @@ const platformLabels = {
 
 const genericSourceLabel = "Source Link";
 
+const currentModuleDirectory = path.dirname(fileURLToPath(import.meta.url));
+const projectRootDirectory = path.resolve(currentModuleDirectory, "..", "..");
 const ytDlpBinaryName = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
-const bundledYtDlpBinaryPath = path.join(process.cwd(), "vendor", "yt-dlp", ytDlpBinaryName);
+const bundledYtDlpBinaryCandidates = [
+  path.join(process.cwd(), "vendor", "yt-dlp", ytDlpBinaryName),
+  path.join(process.cwd(), "vendor", "yt-dlp", "yt-dlp"),
+  path.join(process.cwd(), "vendor", "yt-dlp", "yt-dlp.exe"),
+  path.join(projectRootDirectory, "vendor", "yt-dlp", ytDlpBinaryName),
+  path.join(projectRootDirectory, "vendor", "yt-dlp", "yt-dlp"),
+  path.join(projectRootDirectory, "vendor", "yt-dlp", "yt-dlp.exe")
+];
 const runtimeYtDlpBinaryPath = path.join(tmpdir(), "free2all-bin", ytDlpBinaryName);
 const ytDlpDownloadUrl =
   process.env.YT_DLP_DOWNLOAD_URL?.trim() ||
@@ -233,9 +243,11 @@ async function findYtDlpCommand() {
     addCandidate(envOverride);
   }
 
-  if (await fileExists(bundledYtDlpBinaryPath)) {
-    await ensureExecutable(bundledYtDlpBinaryPath);
-    addCandidate(bundledYtDlpBinaryPath);
+  for (const bundledCandidate of bundledYtDlpBinaryCandidates) {
+    if (await fileExists(bundledCandidate)) {
+      await ensureExecutable(bundledCandidate);
+      addCandidate(bundledCandidate);
+    }
   }
 
   if (await fileExists(runtimeYtDlpBinaryPath)) {
@@ -300,7 +312,7 @@ async function spawnYtDlpProcess(args) {
   });
 }
 
-export function buildDownloadUrl({ sourceUrl, title, format, quality, variant = "media", thumbnailUrl }) {
+export function buildDownloadUrl({ sourceUrl, title, format, quality, variant = "media", thumbnailUrl, selector }) {
   const params = new URLSearchParams({
     sourceUrl,
     title,
@@ -314,6 +326,10 @@ export function buildDownloadUrl({ sourceUrl, title, format, quality, variant = 
 
   if (thumbnailUrl) {
     params.set("thumbnailUrl", thumbnailUrl);
+  }
+
+  if (selector) {
+    params.set("selector", selector);
   }
 
   return `/api/media/download?${params.toString()}`;
@@ -687,6 +703,21 @@ function getFormatSize(format) {
   return Number.isFinite(size) ? size : 0;
 }
 
+function estimateFormatSizeFromBitrate(format, durationSeconds) {
+  const duration = Number(format?.duration || durationSeconds || 0);
+  const bitrateKbps = Number(format?.tbr || format?.vbr || format?.abr || 0);
+
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(bitrateKbps) || bitrateKbps <= 0) {
+    return 0;
+  }
+
+  return Math.round((bitrateKbps * 1000 * duration) / 8);
+}
+
+function getEstimatedFormatSize(format, durationSeconds) {
+  return getFormatSize(format) || estimateFormatSizeFromBitrate(format, durationSeconds);
+}
+
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) {
     return "0:00";
@@ -722,6 +753,10 @@ function getVideoFormats(info) {
   return (info.formats || []).filter((format) => format.vcodec && format.vcodec !== "none" && Number.isFinite(format.height));
 }
 
+function isMuxedVideoFormat(format) {
+  return format?.vcodec && format.vcodec !== "none" && format?.acodec && format.acodec !== "none";
+}
+
 function pickBestAudioFormat(info) {
   return [...getAudioFormats(info)].sort((left, right) => {
     const abrDiff = (right.abr || right.tbr || 0) - (left.abr || left.tbr || 0);
@@ -730,7 +765,7 @@ function pickBestAudioFormat(info) {
       return abrDiff;
     }
 
-    return getFormatSize(right) - getFormatSize(left);
+    return getEstimatedFormatSize(right, info?.duration) - getEstimatedFormatSize(left, info?.duration);
   })[0];
 }
 
@@ -743,6 +778,35 @@ function getDisplayHeights(info) {
   const filteredHeights = heights.filter((height) => height >= 144);
 
   return filteredHeights.length ? filteredHeights : heights;
+}
+
+function rankVideoFormat(format) {
+  const extension = (format.ext || "").toLowerCase();
+  const dynamicRangePenalty = (format.dynamic_range || "").toLowerCase().includes("hdr") ? -1 : 0;
+  const muxedBonus = isMuxedVideoFormat(format) ? 4 : 0;
+  const mp4Bonus = extension === "mp4" ? 3 : 0;
+  const avcBonus = String(format.vcodec || "").toLowerCase().includes("avc") ? 2 : 0;
+  const bitrate = format.tbr || format.vbr || 0;
+
+  return muxedBonus + mp4Bonus + avcBonus + dynamicRangePenalty + bitrate / 100000;
+}
+
+function pickPreferredVideoFormat(info, height) {
+  return [...getVideoFormats(info)]
+    .filter((format) => format.height === height)
+    .sort((left, right) => rankVideoFormat(right) - rankVideoFormat(left))[0];
+}
+
+function buildVideoSelectorFromFormat(format) {
+  if (!format?.format_id) {
+    return null;
+  }
+
+  if (isMuxedVideoFormat(format)) {
+    return format.format_id;
+  }
+
+  return `${format.format_id}+bestaudio/bestaudio/${format.format_id}`;
 }
 
 function buildFallbackTitle(sourceUrl) {
@@ -903,25 +967,12 @@ function createFallbackMediaResult({ url, mode = "video", error }) {
 
 function pickVideoEstimate(info, height) {
   const audio = pickBestAudioFormat(info);
-  const video = [...getVideoFormats(info)]
-    .filter((format) => format.height <= height)
-    .sort((left, right) => {
-      const heightDiff = (right.height || 0) - (left.height || 0);
+  const video = pickPreferredVideoFormat(info, height);
+  const videoSize = getEstimatedFormatSize(video, info?.duration);
+  const audioSize = isMuxedVideoFormat(video) ? 0 : getEstimatedFormatSize(audio, info?.duration);
+  const totalSize = videoSize + audioSize;
 
-      if (heightDiff !== 0) {
-        return heightDiff;
-      }
-
-      const mp4Preference = Number((right.ext || "").toLowerCase() === "mp4") - Number((left.ext || "").toLowerCase() === "mp4");
-
-      if (mp4Preference !== 0) {
-        return mp4Preference;
-      }
-
-      return (right.tbr || 0) - (left.tbr || 0);
-    })[0];
-
-  return formatBytes(getFormatSize(video) + getFormatSize(audio));
+  return totalSize > 0 ? formatBytes(totalSize) : "Preparing";
 }
 
 function inferPlatform(sourceUrl, info) {
@@ -966,20 +1017,32 @@ function buildThumbnailDownload(sourceUrl, title, thumbnailUrl) {
 
 function buildVideoDownloads(sourceUrl, title, info) {
   const heights = getDisplayHeights(info);
-  const downloads = heights.map((height) => ({
-    id: `video-${height}`,
-    label: `${height}p`,
-    format: "mp4",
-    quality: `${height}p`,
-    kind: "video",
-    size: pickVideoEstimate(info, height),
-    downloadUrl: buildDownloadUrl({
-      sourceUrl,
-      title,
-      format: "mp4",
-      quality: `${height}p`
+  const downloads = heights
+    .map((height) => {
+      const selectedFormat = pickPreferredVideoFormat(info, height);
+      const selector = buildVideoSelectorFromFormat(selectedFormat);
+
+      if (!selectedFormat || !selector) {
+        return null;
+      }
+
+      return {
+        id: `video-${height}-${selectedFormat.format_id}`,
+        label: `${height}p`,
+        format: "mp4",
+        quality: `${height}p`,
+        kind: "video",
+        size: pickVideoEstimate(info, height),
+        downloadUrl: buildDownloadUrl({
+          sourceUrl,
+          title,
+          format: "mp4",
+          quality: `${height}p`,
+          selector
+        })
+      };
     })
-  }));
+    .filter(Boolean);
 
   if (!downloads.length) {
     downloads.push({
@@ -988,7 +1051,10 @@ function buildVideoDownloads(sourceUrl, title, info) {
       format: "mp4",
       quality: "Best",
       kind: "video",
-      size: formatBytes(getFormatSize(info.requested_downloads?.[0]) || getFormatSize(info)),
+      size:
+        getEstimatedFormatSize(info.requested_downloads?.[0], info?.duration) || getEstimatedFormatSize(info, info?.duration)
+          ? formatBytes(getEstimatedFormatSize(info.requested_downloads?.[0], info?.duration) || getEstimatedFormatSize(info, info?.duration))
+          : "Preparing",
       downloadUrl: buildDownloadUrl({
         sourceUrl,
         title,
@@ -1014,7 +1080,7 @@ export async function extractMedia({ url, mode = "video" }) {
     const title = info.title || "Media Download";
     const thumbnail = getBestThumbnail(info, url, title);
     const audioFormat = pickBestAudioFormat(info);
-    const audioSizeBytes = getFormatSize(audioFormat);
+    const audioSizeBytes = getEstimatedFormatSize(audioFormat, info?.duration);
     const audioSize = audioSizeBytes > 0 ? formatBytes(audioSizeBytes) : "Preparing";
 
     const downloads =
@@ -1034,7 +1100,12 @@ export async function extractMedia({ url, mode = "video" }) {
         platformLabel,
         creator: info.channel || info.uploader || info.creator || "Source media",
         duration: formatDuration(info.duration),
-        estimatedSize: downloads[0]?.size || formatBytes(getFormatSize(audioFormat) || getFormatSize(info)),
+        estimatedSize:
+          downloads[0]?.size ||
+          (() => {
+            const estimatedBytes = getEstimatedFormatSize(audioFormat, info?.duration) || getEstimatedFormatSize(info, info?.duration);
+            return estimatedBytes > 0 ? formatBytes(estimatedBytes) : "Preparing";
+          })(),
         thumbnail,
         downloads,
         insights: [
@@ -1142,7 +1213,7 @@ async function clearTempDirectoryContents(tempDirectory) {
   );
 }
 
-function buildYtDlpDownloadArgs({ tempDirectory, sourceUrl, format, quality, withProgress = false, useProxy = false }) {
+function buildYtDlpDownloadArgs({ tempDirectory, sourceUrl, format, quality, selector, withProgress = false, useProxy = false }) {
   const outputTemplate = path.join(tempDirectory, "%(title)s.%(ext)s");
   const baseArgs = [
     ...getYtDlpBaseArgs(useProxy),
@@ -1184,7 +1255,7 @@ function buildYtDlpDownloadArgs({ tempDirectory, sourceUrl, format, quality, wit
     "--recode-video",
     "mp4",
     "-f",
-    buildVideoSelector(quality),
+    selector || buildVideoSelector(quality),
     sourceUrl
   ];
 }
@@ -1260,7 +1331,7 @@ async function failDownloadJob(job, error) {
   scheduleDownloadJobCleanup(job.id, 2 * 60 * 1000);
 }
 
-export async function startDownloadJob({ sourceUrl, title, format, quality }) {
+export async function startDownloadJob({ sourceUrl, title, format, quality, selector }) {
   const id = randomUUID();
   const tempDirectory = await mkdtemp(path.join(tmpdir(), "free2all-"));
   const attempts = getSourceAttemptPlan(sourceUrl);
@@ -1304,6 +1375,7 @@ export async function startDownloadJob({ sourceUrl, title, format, quality }) {
       sourceUrl: attempt.url,
       format,
       quality,
+      selector,
       withProgress: true,
       useProxy: attempt.useProxy
     });
@@ -1422,7 +1494,7 @@ export async function cleanupDownloadJob(jobId) {
   await destroyDownloadJob(jobId);
 }
 
-export async function downloadMediaAsset({ sourceUrl, title, format, quality }) {
+export async function downloadMediaAsset({ sourceUrl, title, format, quality, selector }) {
   const tempDirectory = await mkdtemp(path.join(tmpdir(), "free2all-"));
   const attempts = getSourceAttemptPlan(sourceUrl);
   let lastError;
@@ -1437,6 +1509,7 @@ export async function downloadMediaAsset({ sourceUrl, title, format, quality }) 
       sourceUrl: attempt.url,
       format,
       quality,
+      selector,
       withProgress: false,
       useProxy: attempt.useProxy
     });

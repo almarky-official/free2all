@@ -13,6 +13,7 @@ import {
 } from "@/lib/media";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -21,6 +22,7 @@ export async function GET(request) {
   const title = searchParams.get("title") || "Free2All Download";
   const format = searchParams.get("format") || "bin";
   const quality = searchParams.get("quality") || "standard";
+  const selector = searchParams.get("selector") || "";
   const variant = searchParams.get("variant") || "media";
   const thumbnailUrl = searchParams.get("thumbnailUrl");
   const view = searchParams.get("view");
@@ -109,7 +111,8 @@ export async function GET(request) {
       sourceUrl,
       title,
       format,
-      quality
+      quality,
+      selector
     });
 
     return await createDownloadResponse({
@@ -133,6 +136,7 @@ export async function POST(request) {
   const title = searchParams.get("title") || "Free2All Download";
   const format = searchParams.get("format") || "bin";
   const quality = searchParams.get("quality") || "standard";
+  const selector = searchParams.get("selector") || "";
   const variant = searchParams.get("variant") || "media";
 
   if (!sourceUrl) {
@@ -148,7 +152,8 @@ export async function POST(request) {
       sourceUrl,
       title,
       format,
-      quality
+      quality,
+      selector
     });
 
     return NextResponse.json(job, {

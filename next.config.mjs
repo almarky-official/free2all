@@ -5,7 +5,7 @@ const nextConfig = {
   compress: true,
   serverExternalPackages: ["ffmpeg-static"],
   outputFileTracingIncludes: {
-    "/api/media/*": ["./vendor/yt-dlp/**/*"]
+    "/*": ["./vendor/yt-dlp/**/*"]
   },
   experimental: {
     optimizePackageImports: ["lucide-react"]
