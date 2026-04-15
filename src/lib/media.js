@@ -735,11 +735,14 @@ function pickBestAudioFormat(info) {
 }
 
 function getAvailableHeights(info) {
-  return [...new Set(getVideoFormats(info).map((format) => format.height).filter(Boolean))].sort((left, right) => right - left);
+  return [...new Set(getVideoFormats(info).map((format) => format.height).filter(Boolean))].sort((left, right) => left - right);
 }
 
-function pickHeightAtOrBelow(heights, desired) {
-  return heights.find((height) => height <= desired) || heights[0] || null;
+function getDisplayHeights(info) {
+  const heights = getAvailableHeights(info);
+  const filteredHeights = heights.filter((height) => height >= 144);
+
+  return filteredHeights.length ? filteredHeights : heights;
 }
 
 function buildFallbackTitle(sourceUrl) {
@@ -783,22 +786,36 @@ function createGenericDownloadSet(sourceUrl, title, mode) {
 
   return [
     {
-      id: "mp4-best",
-      label: "MP4 Best",
+      id: "video-144",
+      label: "144p",
       format: "mp4",
-      quality: "best",
+      quality: "144p",
       kind: "video",
       size: "Preparing",
       downloadUrl: buildDownloadUrl({
         sourceUrl,
         title,
         format: "mp4",
-        quality: "best"
+        quality: "144p"
       })
     },
     {
-      id: "mp4-720",
-      label: "MP4 720p",
+      id: "video-360",
+      label: "360p",
+      format: "mp4",
+      quality: "360p",
+      kind: "video",
+      size: "Preparing",
+      downloadUrl: buildDownloadUrl({
+        sourceUrl,
+        title,
+        format: "mp4",
+        quality: "360p"
+      })
+    },
+    {
+      id: "video-720",
+      label: "720p",
       format: "mp4",
       quality: "720p",
       kind: "video",
@@ -808,6 +825,20 @@ function createGenericDownloadSet(sourceUrl, title, mode) {
         title,
         format: "mp4",
         quality: "720p"
+      })
+    },
+    {
+      id: "video-1080",
+      label: "1080p",
+      format: "mp4",
+      quality: "1080p",
+      kind: "video",
+      size: "Preparing",
+      downloadUrl: buildDownloadUrl({
+        sourceUrl,
+        title,
+        format: "mp4",
+        quality: "1080p"
       })
     },
     buildAudioDownload(sourceUrl, title)
@@ -902,7 +933,7 @@ function buildAudioDownload(sourceUrl, title, size = "Preparing") {
     id: "mp3-standard",
     label: "Audio",
     format: "mp3",
-    quality: "Best",
+    quality: "Audio",
     kind: "audio",
     size,
     downloadUrl: buildDownloadUrl({
@@ -934,41 +965,38 @@ function buildThumbnailDownload(sourceUrl, title, thumbnailUrl) {
 }
 
 function buildVideoDownloads(sourceUrl, title, info) {
-  const heights = getAvailableHeights(info);
-  const selectedHeights = [];
-
-  const primary = pickHeightAtOrBelow(heights, 1080);
-  if (primary) {
-    selectedHeights.push(primary);
-  }
-
-  const secondary = pickHeightAtOrBelow(
-    heights.filter((height) => height < (primary || Number.POSITIVE_INFINITY)),
-    720
-  );
-
-  if (secondary && !selectedHeights.includes(secondary)) {
-    selectedHeights.push(secondary);
-  }
-
-  if (!selectedHeights.length) {
-    selectedHeights.push("best");
-  }
-
-  const downloads = selectedHeights.map((height) => ({
-    id: `mp4-${height}`,
-    label: height === "best" ? "MP4 Best" : `MP4 ${height}p`,
+  const heights = getDisplayHeights(info);
+  const downloads = heights.map((height) => ({
+    id: `video-${height}`,
+    label: `${height}p`,
     format: "mp4",
-    quality: height === "best" ? "best" : `${height}p`,
+    quality: `${height}p`,
     kind: "video",
-    size: height === "best" ? formatBytes(getFormatSize(info.requested_downloads?.[0]) || getFormatSize(info)) : pickVideoEstimate(info, height),
+    size: pickVideoEstimate(info, height),
     downloadUrl: buildDownloadUrl({
       sourceUrl,
       title,
       format: "mp4",
-      quality: height === "best" ? "best" : `${height}p`
+      quality: `${height}p`
     })
   }));
+
+  if (!downloads.length) {
+    downloads.push({
+      id: "video-best",
+      label: "Best",
+      format: "mp4",
+      quality: "Best",
+      kind: "video",
+      size: formatBytes(getFormatSize(info.requested_downloads?.[0]) || getFormatSize(info)),
+      downloadUrl: buildDownloadUrl({
+        sourceUrl,
+        title,
+        format: "mp4",
+        quality: "best"
+      })
+    });
+  }
 
   downloads.push(buildAudioDownload(sourceUrl, title));
   return downloads;
