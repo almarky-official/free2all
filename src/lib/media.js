@@ -30,7 +30,29 @@ const genericSourceLabel = "Source Link";
 
 const currentModuleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRootDirectory = path.resolve(currentModuleDirectory, "..", "..");
+
+function getYtDlpAssetName() {
+  if (process.platform === "win32") {
+    return "yt-dlp.exe";
+  }
+
+  if (process.platform === "darwin") {
+    return "yt-dlp_macos";
+  }
+
+  if (process.platform === "linux" && process.arch === "arm64") {
+    return "yt-dlp_linux_aarch64";
+  }
+
+  if (process.platform === "linux") {
+    return "yt-dlp_linux";
+  }
+
+  return "yt-dlp";
+}
+
 const ytDlpBinaryName = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
+const ytDlpAssetName = getYtDlpAssetName();
 const bundledYtDlpBinaryCandidates = [
   path.join(process.cwd(), "vendor", "yt-dlp", ytDlpBinaryName),
   path.join(process.cwd(), "vendor", "yt-dlp", "yt-dlp"),
@@ -42,7 +64,7 @@ const bundledYtDlpBinaryCandidates = [
 const runtimeYtDlpBinaryPath = path.join(tmpdir(), "free2all-bin", ytDlpBinaryName);
 const ytDlpDownloadUrl =
   process.env.YT_DLP_DOWNLOAD_URL?.trim() ||
-  `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${ytDlpBinaryName}`;
+  `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${ytDlpAssetName}`;
 const ytDlpPathCandidates = process.platform === "win32" ? ["yt-dlp.exe", "yt-dlp"] : ["yt-dlp"];
 const pythonYtDlpCandidates =
   process.platform === "win32"

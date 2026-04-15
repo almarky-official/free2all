@@ -2,12 +2,33 @@ import { chmod, mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
+function getYtDlpAssetName() {
+  if (process.platform === "win32") {
+    return "yt-dlp.exe";
+  }
+
+  if (process.platform === "darwin") {
+    return "yt-dlp_macos";
+  }
+
+  if (process.platform === "linux" && process.arch === "arm64") {
+    return "yt-dlp_linux_aarch64";
+  }
+
+  if (process.platform === "linux") {
+    return "yt-dlp_linux";
+  }
+
+  return "yt-dlp";
+}
+
 const ytDlpBinaryName = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
+const ytDlpAssetName = getYtDlpAssetName();
 const targetPath =
   process.env.YT_DLP_INSTALL_PATH?.trim() || path.join(process.cwd(), "vendor", "yt-dlp", ytDlpBinaryName);
 const downloadUrl =
   process.env.YT_DLP_DOWNLOAD_URL?.trim() ||
-  `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${ytDlpBinaryName}`;
+  `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${ytDlpAssetName}`;
 const skipDownload = /^(1|true)$/i.test(process.env.SKIP_YT_DLP_DOWNLOAD || "");
 
 function log(message) {
