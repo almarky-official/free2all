@@ -4,10 +4,11 @@
   "private": true,
   "description": "Free2All is a modern full-stack web app for video, audio, and utility tools.",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "postinstall": "node scripts/install-yt-dlp.mjs"
+    "install:yt-dlp": "node scripts/install-yt-dlp.mjs",
+    "dev": "npm run install:yt-dlp && next dev",
+    "build": "npm run install:yt-dlp && next build",
+    "start": "npm run install:yt-dlp && next start",
+    "postinstall": "npm run install:yt-dlp"
   },
   "keywords": [
     "free video downloader",
